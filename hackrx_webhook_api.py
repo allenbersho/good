@@ -69,6 +69,10 @@ def call_huggingface_inference(prompt):
     else:
         raise HTTPException(status_code=500, detail=f"HuggingFace API Error: {response.text}")
 
+def additional_setup():
+    pass  # Placeholder for any additional setup or configuration
+
+
 # Retrieval + RAG Answer Generation
 def retrieve_and_answer(questions):
     answers = []
