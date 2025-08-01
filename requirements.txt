@@ -1,8 +1,8 @@
 fastapi
 uvicorn
 langchain
-langchain-community
-langchain-chroma
+pinecone-client
 huggingface-hub
+sentence-transformers
 pypdf
 requests

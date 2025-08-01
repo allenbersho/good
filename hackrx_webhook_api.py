@@ -1,30 +1,23 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import requests
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_chroma import Chroma
-from uuid import uuid4
-from langchain_community.chat_models import ChatOllama
+from langchain.vectorstores import Pinecone as PineconeLangChain
+from langchain.embeddings import HuggingFaceEmbeddings
+import pinecone
 import os
 import uvicorn
 
 app = FastAPI()
 
-# Initialize Embeddings and Vector Store
-embeddings_model = HuggingFaceEmbeddings(
-    model_name="BAAI/bge-small-en",
-    model_kwargs={"device": "cpu"}
-)
-vector_store = Chroma(
-    collection_name="example_collection",
-    embedding_function=embeddings_model,
-    persist_directory="chroma_db",
-)
+# Initialize Pinecone
+pinecone.init(api_key=os.getenv("PINECONE_API_KEY"), environment=os.getenv("PINECONE_ENVIRONMENT"))
+index_name = "hackrx-index"
 
-# Load Ollama Chat Model
-llm = ChatOllama(model="mistral")
+# Initialize Embeddings
+embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-small-en")
+
+# Initialize Vector Store
+vector_store = PineconeLangChain.from_existing_index(index_name, embeddings)
 
 # Input Schema
 class RunRequest(BaseModel):
@@ -42,28 +35,46 @@ def download_pdf(url, save_path):
 
 # Process Document and Update Vector DB
 def process_document(file_path):
+    from langchain.document_loaders import PyPDFLoader
+    from langchain.text_splitter import RecursiveCharacterTextSplitter
+
     loader = PyPDFLoader(file_path)
     raw_documents = loader.load()
 
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=600,
+        chunk_size=500,
         chunk_overlap=150,
         length_function=len,
         is_separator_regex=False,
     )
 
     chunks = text_splitter.split_documents(raw_documents)
-    uuids = [str(uuid4()) for _ in range(len(chunks))]
-    vector_store.add_documents(documents=chunks, ids=uuids)
+    vector_store.add_documents(chunks)
 
-# Retrieval + RAG Answer Generation with Enhanced Filtering
+# HuggingFace Inference API Call
+def call_huggingface_inference(prompt):
+    api_url = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2"
+    headers = {"Authorization": f"Bearer {os.getenv('HUGGINGFACE_API_KEY')}"}
+
+    payload = {
+        "inputs": prompt,
+        "parameters": {"return_full_text": False}
+    }
+
+    response = requests.post(api_url, headers=headers, json=payload)
+
+    if response.status_code == 200:
+        generated_text = response.json()[0]['generated_text']
+        return generated_text.strip()
+    else:
+        raise HTTPException(status_code=500, detail=f"HuggingFace API Error: {response.text}")
+
+# Retrieval + RAG Answer Generation
 def retrieve_and_answer(questions):
     answers = []
     for q in questions:
         docs = vector_store.similarity_search(q, k=5)
-        filtered_docs = [doc.page_content for doc in docs if any(keyword.lower() in doc.page_content.lower() for keyword in q.split())]
-
-        context = "\n\n".join(filtered_docs) if filtered_docs else "\n\n".join([doc.page_content for doc in docs])
+        context = "\n\n".join([doc.page_content for doc in docs])
 
         prompt = f"""
 You are a policy clause extraction assistant. Given the context, extract the exact clause(s) or sentences that answer the user's question. Do not summarize or infer. If the answer is not found in the context, reply 'Not Found'.
@@ -75,8 +86,8 @@ Question: {q}
 
 Answer:
 """
-        response = llm.invoke(prompt)
-        answers.append(response.content.strip())
+        answer = call_huggingface_inference(prompt)
+        answers.append(answer)
 
     return answers
 
